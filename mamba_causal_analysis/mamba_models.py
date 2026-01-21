@@ -55,6 +55,9 @@ class MambaModelAndTokenizer:
         # Load tokenizer (Mamba uses GPT-NeoX tokenizer)
         if tokenizer is None:
             self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+            # Set pad token to eos token (standard practice)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
         else:
             self.tokenizer = tokenizer
 
