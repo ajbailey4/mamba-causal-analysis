@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(python3:*)",
+      "Bash(git add:*)"
     ]
   }
 }

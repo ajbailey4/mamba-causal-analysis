@@ -79,7 +79,6 @@ ssms/
 │   └── visualize_flow.py    # TODO: Visualization tools
 ├── configs/mamba/           # Configuration files for different models
 ├── notebooks/               # Jupyter notebooks for analysis
-├── rome/                    # Original ROME repository (git submodule)
 ├── test_phase1.py           # ✓ Phase 1 verification tests
 ├── IMPLEMENTATION_PLAN.md   # Detailed implementation roadmap
 ├── SETUP_INSTRUCTIONS.md    # Step-by-step setup guide

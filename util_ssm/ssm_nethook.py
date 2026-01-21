@@ -5,17 +5,12 @@ Extends ROME's nethook.py to work with Mamba SSM architecture.
 The core Trace and TraceDict classes from ROME are architecture-agnostic
 and work with any PyTorch module, so we mainly add convenience functions
 for Mamba-specific layer naming.
+
+Note: We include a copy of ROME's nethook.py in this directory.
+Original source: https://github.com/kmeng01/rome/blob/main/util/nethook.py
 """
 
-import sys
-from pathlib import Path
-
-# Add rome directory to path to import nethook
-rome_path = Path(__file__).parent.parent / "rome"
-if str(rome_path) not in sys.path:
-    sys.path.insert(0, str(rome_path))
-
-from util import nethook  # ROME's nethook utilities
+from . import nethook  # ROME's nethook utilities (local copy)
 
 # Re-export ROME's utilities for convenience
 Trace = nethook.Trace

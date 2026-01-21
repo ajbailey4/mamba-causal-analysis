@@ -224,19 +224,22 @@ tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")  # Mamba us
 model.eval().cuda()
 ```
 
-## Reusable Components from ROME
+## Attribution: ROME
 
-**Can reuse directly:**
-- `util/nethook.py`: `Trace`, `TraceDict`, `recursive_copy` - all architecture-agnostic
-- Noise injection patterns (lines 167-199 in `rome/experiments/causal_trace.py`)
-- Input preparation and tokenization helpers (lines 592-628 in `rome/experiments/causal_trace.py`)
-- Dataset loading from ROME's `dsets/` directory
+This project builds upon the ROME methodology and includes `nethook.py` from the ROME repository:
+- **Original ROME**: https://github.com/kmeng01/rome
+- **Paper**: "Locating and Editing Factual Associations in GPT" (Meng et al., NeurIPS 2022)
+- **License**: MIT
 
-**Need to adapt:**
-- `layername()` function (lines 487-498 in `rome/experiments/causal_trace.py`) - Mamba uses different naming
-- `ModelAndTokenizer` class (lines 445-484 in `rome/experiments/causal_trace.py`) - need Mamba-specific layer identification
-- `get_reprs_at_idxs()` (lines 102-159 in `rome/rome/repr_tools.py`) - same pattern but different module names
-- `trace_with_patch()` (lines 133-229 in `rome/experiments/causal_trace.py`) - need to handle recurrent state dependencies
+**What we use from ROME:**
+- `util_ssm/nethook.py`: Copy of ROME's model instrumentation utilities (`Trace`, `TraceDict`, `recursive_copy`)
+- Conceptual framework for causal tracing methodology
+
+**What we've adapted for Mamba:**
+- `mamba_models.py`: Mamba-specific `ModelAndTokenizer` class
+- `ssm_nethook.py`: Wrappers for Mamba layer naming conventions
+- `mamba_layernames.py`: Mamba architecture parsing
+- Future: `mamba_causal_trace.py` will adapt `trace_with_patch()` for recurrent states
 
 ## Key Research Questions
 
