@@ -29,7 +29,7 @@ print()
 # Test 1: Import modules
 print("Test 1: Importing modules...")
 try:
-    from mamba_analysis.mamba_models import MambaModelAndTokenizer, load_mamba_model
+    from mamba_causal_analysis.mamba_models import MambaModelAndTokenizer, load_mamba_model
     from util_ssm import ssm_nethook
     from util_ssm import mamba_layernames
     print("✓ All modules imported successfully")
@@ -106,8 +106,11 @@ try:
     test_prompt = "The Eiffel Tower is located in"
     inputs = mt.tokenizer(test_prompt, return_tensors="pt").to(mt.device)
 
+    # Mamba doesn't use attention_mask (it's a state space model, not attention-based)
+    model_inputs = {k: v for k, v in inputs.items() if k == 'input_ids'}
+
     with torch.no_grad():
-        outputs = mt.model(**inputs)
+        outputs = mt.model(**model_inputs)
 
     print(f"  Input: '{test_prompt}'")
     print(f"  Input shape: {inputs['input_ids'].shape}")
@@ -133,7 +136,7 @@ try:
 
     with ssm_nethook.trace_mamba_layer(mt.model, test_layer, 'mixer') as trace:
         with torch.no_grad():
-            outputs = mt.model(**inputs)
+            outputs = mt.model(**model_inputs)
         hidden_states = trace.output
 
     print(f"  Hooked layer: {test_layer} (mixer)")
@@ -160,7 +163,7 @@ try:
 
     with ssm_nethook.trace_multiple_mamba_layers(mt.model, layer_specs) as traces:
         with torch.no_grad():
-            outputs = mt.model(**inputs)
+            outputs = mt.model(**model_inputs)
 
     print(f"  Hooked {len(layer_specs)} layers")
     for spec in layer_specs:
@@ -186,7 +189,7 @@ try:
 
     with ssm_nethook.trace_mamba_layer(mt.model, test_layer, 'mixer') as trace:
         with torch.no_grad():
-            outputs = mt.model(**inputs)
+            outputs = mt.model(**model_inputs)
         hidden_states = trace.output
 
     # Extract last token

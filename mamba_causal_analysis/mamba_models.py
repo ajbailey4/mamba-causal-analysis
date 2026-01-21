@@ -64,11 +64,13 @@ class MambaModelAndTokenizer:
                 raise ValueError("Must provide either model_name or model")
 
             print(f"Loading Mamba model: {model_name}")
-            self.model = MambaLMHeadModel.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-            )
+            self.model = MambaLMHeadModel.from_pretrained(model_name)
             self.model.eval()
+
+            # Convert dtype if specified
+            if torch_dtype is not None:
+                self.model = self.model.to(dtype=torch_dtype)
+
             self.model.to(device)
 
             # Disable gradients for efficiency
