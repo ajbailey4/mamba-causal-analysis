@@ -82,11 +82,14 @@ git submodule update
 ```bash
 cd mamba-causal-analysis
 
-# Create conda environment
-conda env create -f environment.yml
+# Install UV if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies (creates .venv automatically)
+uv sync
 
 # Activate environment
-conda activate mamba-causal
+source .venv/bin/activate
 
 # Verify setup
 python test_phase1.py

@@ -22,28 +22,34 @@ This project extends the causal tracing techniques from "Locating and Editing Fa
 
 1. **Clone this repository:**
    ```bash
-   git clone <your-repo-url>
-   cd ssms
+   git clone https://github.com/ajbailey4/mamba-causal-analysis.git
+   cd mamba-causal-analysis
    ```
 
-2. **Create conda environment:**
+2. **Install UV (if not already installed):**
    ```bash
-   # Option 1: Using environment.yml (recommended)
-   conda env create -f environment.yml
+   # macOS/Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
 
-   # Option 2: Manual setup
-   conda create -n mamba-causal python=3.10 -y
-   conda activate mamba-causal
-   conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia -y
-   pip install -r requirements.txt
+   # Or with pip
+   pip install uv
+
+   # Or with homebrew (macOS)
+   brew install uv
    ```
 
-3. **Activate environment:**
+3. **Install dependencies:**
    ```bash
-   conda activate mamba-causal
+   # One command - creates venv and installs everything!
+   uv sync
    ```
 
-4. **Verify installation:**
+4. **Activate environment:**
+   ```bash
+   source .venv/bin/activate
+   ```
+
+5. **Verify installation:**
    ```bash
    python test_phase1.py
    ```
@@ -55,11 +61,11 @@ This project extends the causal tracing techniques from "Locating and Editing Fa
    ==================================================================
    ```
 
-### Alternative: Quick Setup Script
+### Alternative: Run Without Activating
 
 ```bash
-# One-command setup (if conda is available)
-conda env create -f environment.yml && conda activate mamba-causal && python test_phase1.py
+# UV can run commands without activating the environment
+uv run python test_phase1.py
 ```
 
 ## 📁 Project Structure

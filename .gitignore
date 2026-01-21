@@ -24,7 +24,12 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 mamba-causal-env/
+
+# UV
+.uv/
+uv.lock
 
 # Jupyter Notebook
 .ipynb_checkpoints
