@@ -1,0 +1,50 @@
+# Conda environment specification for Mamba Causal Analysis
+# Create environment with: conda env create -f environment.yml
+# Update environment with: conda env update -f environment.yml
+
+name: mamba-causal
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Python version
+  - python=3.10
+
+  # PyTorch with CUDA support
+  # Adjust pytorch-cuda version based on your GPU
+  - pytorch>=2.0.0
+  - torchvision>=0.15.0
+  - torchaudio>=2.0.0
+  - pytorch-cuda=11.8  # Change to 12.1 for newer GPUs, or remove for CPU-only
+
+  # For CPU-only, comment out the line above and uncomment below:
+  # - cpuonly
+
+  # Jupyter and notebook support
+  - jupyter>=1.0.0
+  - ipykernel>=6.23.0
+  - ipywidgets>=8.0.0
+
+  # Scientific computing
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - matplotlib>=3.7.0
+
+  # Pip packages (installed via pip within conda env)
+  - pip>=23.0
+  - pip:
+      # Mamba SSM (not available via conda)
+      - mamba-ssm>=1.2.0
+
+      # Transformers
+      - transformers>=4.30.0
+      - tokenizers>=0.13.0
+      - datasets>=2.14.0
+
+      # Utilities
+      - tqdm>=4.65.0
+      - seaborn>=0.12.0

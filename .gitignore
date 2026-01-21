@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+mamba-causal-env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# PyTorch / Model checkpoints
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+models/
+*.safetensors
+
+# Data and results
+data/
+results/
+experiments_ssm/results/
+*.npz
+*.npy
+
+# Cached models (HuggingFace)
+.cache/
+huggingface_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Environment variables
+.env
+.env.local
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# OS
+Thumbs.db
+.Spotlight-V100
+.Trashes
+
+# Project-specific
+# Note: We DO want to track the rome/ directory if it's cloned as a submodule
+# But we don't want to track downloaded model weights
+
+# Large files that shouldn't be in git
+*.pkl
+*.pickle
+*.hdf5
+*.h5
+
+# Experimental outputs
+pdfs/
+cases/
+plots/
+figures/
+
+# Don't ignore these important files
+!.gitignore
+!README*.md
+!requirements.txt
+!*.py
+!*.json
+!*.md
