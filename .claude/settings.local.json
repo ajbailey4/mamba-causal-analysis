@@ -8,7 +8,9 @@
       "Bash(git ls-tree:*)",
       "Bash(python3:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(jq:*)",
+      "Bash(python test_vertical_restoration.py:*)"
     ]
   }
 }

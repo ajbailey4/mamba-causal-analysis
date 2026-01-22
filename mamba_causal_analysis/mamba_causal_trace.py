@@ -20,6 +20,16 @@ from util_ssm import ssm_nethook
 
 
 def trace_with_patch_mamba(
+    model,  # The model
+    inp: torch.Tensor,  # A set of inputs
+    states_to_patch: List[Tuple[int, int]],  # A list of (token index, layername) triples to restore
+    answers_t,  # Answer probabilities to collect
+    tokens_to_mix: Tuple[int, int],  # Range of tokens to corrupt (begin, end)
+    noise=0.1,  # Level of noise to add
+    uniform_noise=False,
+    replace=False,  # True to replace with instead of add noise
+    trace_layers=None,  # List of traced outputs to return
+):
     model,
     input_ids: torch.Tensor,
     states_to_patch: List[Tuple[int, int]],  # List of (layer, token_position) pairs
@@ -442,7 +452,7 @@ def calculate_hidden_flow(
     component: str = None,  # None means patch after residual (default)
     batch_size: int = 1,
     patch_entire_layer: bool = True,  # Use per-layer patching by default
-    mode: str = None,  # None (auto), "per_layer", "per_position", "per_position_ssm", "vertical"
+    mode: str = None,  # None (auto), "per_layer", "per_position", "per_position_ssm", "vertical", "per_timestep_ssm"
 ) -> Dict[str, Any]:
     """
     Calculate information flow for causal tracing analysis.
@@ -471,6 +481,8 @@ def calculate_hidden_flow(
             - "per_layer": Test each layer (1D output)
             - "per_position": Test each (layer, position) with hidden states (2D output)
             - "per_position_ssm": Test each (layer, position) with SSM states (2D output, slow)
+            - "vertical": Test each position with hidden states across all layers (1D output)
+            - "per_timestep_ssm": Test each position with SSM states across all layers (1D output, slow)
 
     Returns:
         Dict containing:
@@ -494,13 +506,23 @@ def calculate_hidden_flow(
         ... )
         >>> # result['scores'] has shape [num_layers]
 
-        >>> # Vertical restoration mode - restore all layers at each position
+        >>> # Per-timestep restoration (hidden states) - restore all layers at each position
         >>> result = calculate_hidden_flow(
         ...     mt, mt.tokenizer,
         ...     prompt="The Eiffel Tower is located in",
         ...     subject="Eiffel Tower",
         ...     samples=10,
         ...     mode="vertical"
+        ... )
+        >>> # result['scores'] has shape [seq_len]
+
+        >>> # Per-timestep restoration (SSM states) - restore SSM states at each position
+        >>> result = calculate_hidden_flow(
+        ...     mt, mt.tokenizer,
+        ...     prompt="The Eiffel Tower is located in",
+        ...     subject="Eiffel Tower",
+        ...     samples=10,
+        ...     mode="per_timestep_ssm"
         ... )
         >>> # result['scores'] has shape [seq_len]
 
@@ -575,6 +597,8 @@ def calculate_hidden_flow(
         patch_entire_layer = False
     elif mode == "vertical":
         patch_entire_layer = False  # Vertical uses per-position patching
+    elif mode == "per_timestep_ssm":
+        patch_entire_layer = False  # Per-timestep SSM uses sequential processing
     # per_position_ssm doesn't use patch_entire_layer
 
     # Collect clean states for all layers
@@ -582,9 +606,17 @@ def calculate_hidden_flow(
 
     if mode == "vertical":
         # Vertical mode: test each position (restoring ALL layers at that position)
+        # This restores HIDDEN STATES (mixer outputs)
         clean_states = collect_states(raw_model, input_ids, all_layers, component)
         scores = np.zeros(seq_len)  # 1D: just positions
-        print(f"Tracing {seq_len} positions (vertical restoration - all layers at each position)...")
+        print(f"Tracing {seq_len} positions (per-timestep hidden state restoration)...")
+    elif mode == "per_timestep_ssm":
+        # Per-timestep SSM mode: restore SSM recurrent states at each position
+        print(f"Collecting clean SSM states (token-by-token, slow)...")
+        conv_clean, ssm_clean = collect_ssm_states_sequential(raw_model, input_ids, all_layers)
+        clean_states = (conv_clean, ssm_clean)
+        scores = np.zeros(seq_len)  # 1D: just positions
+        print(f"Tracing {seq_len} positions (per-timestep SSM state restoration)...")
     elif mode == "per_position_ssm":
         # Use sequential SSM state collection
         print(f"Collecting clean SSM states (token-by-token, slow)...")
@@ -643,6 +675,29 @@ def calculate_hidden_flow(
                         noise_level=noise_level,
                         component=component,
                         patch_entire_layer=False,  # Must use per-position for vertical
+                    )
+                    probs = torch.softmax(logits[0, -1, :], dim=0)
+                    position_probs.append(probs[target_token_id].item())
+
+            # Average across samples
+            scores[position] = np.mean(position_probs)
+
+            if (position + 1) % 2 == 0:
+                print(f"  Completed position {position + 1}/{seq_len}")
+    elif mode == "per_timestep_ssm":
+        # Per-timestep SSM restoration: restore SSM states at each position across ALL layers
+        for position in range(seq_len):
+            position_probs = []
+
+            for _ in range(samples):
+                with torch.no_grad():
+                    logits = trace_with_ssm_state_patch_all_layers(
+                        raw_model,
+                        input_ids,
+                        position_to_patch=position,
+                        clean_states=clean_states,
+                        tokens_to_mix=tokens_to_mix,
+                        noise_level=noise_level,
                     )
                     probs = torch.softmax(logits[0, -1, :], dim=0)
                     position_probs.append(probs[target_token_id].item())
@@ -832,6 +887,101 @@ def collect_ssm_states_sequential(
         inference_params.seqlen_offset += 1
 
     return conv_states_all, ssm_states_all
+
+
+def trace_with_ssm_state_patch_all_layers(
+    model,
+    input_ids: torch.Tensor,
+    position_to_patch: int,  # Restore this position across ALL layers
+    clean_states: Tuple[Dict, Dict],  # (conv_states, ssm_states)
+    tokens_to_mix: int = None,
+    noise_level: float = 3.0,
+) -> torch.Tensor:
+    """
+    Patch SSM states at a specific position across ALL layers (per-timestep SSM restoration).
+
+    This corrupts subject embeddings and processes token-by-token, injecting clean SSM states
+    at the specified position in EVERY layer.
+
+    Args:
+        model: Mamba model (raw, not wrapped)
+        input_ids: Input token IDs [batch_size, seq_len]
+        position_to_patch: Token position to restore in all layers
+        clean_states: Tuple of (conv_states_dict, ssm_states_dict) from collect_ssm_states_sequential
+        tokens_to_mix: Number of tokens to corrupt (from start). If None, corrupts all.
+        noise_level: Standard deviations of noise to add to embeddings
+
+    Returns:
+        torch.Tensor: Model logits [batch_size, seq_len, vocab_size]
+    """
+    from mamba_ssm.utils.generation import InferenceParams
+
+    device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
+    batch_size, seq_len = input_ids.shape
+
+    conv_clean, ssm_clean = clean_states
+
+    # Determine how many tokens to corrupt
+    if tokens_to_mix is None:
+        tokens_to_mix = seq_len
+
+    # Get embeddings and corrupt subject tokens
+    embedding_layer = model.backbone.embedding
+    with torch.no_grad():
+        clean_embeds = embedding_layer(input_ids)
+        noise = torch.randn_like(clean_embeds[:, :tokens_to_mix]) * noise_level * clean_embeds[:, :tokens_to_mix].std()
+        corrupted_embeds = clean_embeds.clone()
+        corrupted_embeds[:, :tokens_to_mix] += noise
+
+    # Initialize inference
+    inference_params = InferenceParams(
+        max_seqlen=seq_len,
+        max_batch_size=batch_size,
+    )
+
+    # Allocate cache
+    cache = model.allocate_inference_cache(batch_size, max_seqlen=seq_len)
+    inference_params.key_value_memory_dict = cache
+
+    # Process token-by-token
+    for position in range(seq_len):
+        # Check if we should inject clean states at this position (in ALL layers)
+        if position == position_to_patch:
+            # Inject clean SSM states in ALL layers
+            for layer_idx in cache.keys():
+                if layer_idx in conv_clean and position in conv_clean[layer_idx]:
+                    cache[layer_idx] = (
+                        conv_clean[layer_idx][position].clone(),
+                        ssm_clean[layer_idx][position].clone()
+                    )
+
+        # Get corrupted embedding for this token
+        token_embed = corrupted_embeds[:, position:position+1, :]
+
+        # Process through backbone layers
+        hidden_states = token_embed
+        residual = None
+
+        # Forward through layers with inference_params
+        for layer_idx, layer in enumerate(model.backbone.layers):
+            hidden_states, residual = layer(
+                hidden_states,
+                residual,
+                inference_params=inference_params
+            )
+
+        # Update offset
+        inference_params.seqlen_offset += 1
+
+    # Apply final norm and LM head
+    with torch.no_grad():
+        if residual is not None:
+            hidden_states = hidden_states + residual
+        hidden_states = model.backbone.norm_f(hidden_states)
+        logits = model.lm_head(hidden_states)
+
+    return logits
 
 
 def trace_with_ssm_state_patch_sequential(
