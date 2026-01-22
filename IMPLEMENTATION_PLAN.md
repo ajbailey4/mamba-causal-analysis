@@ -87,65 +87,88 @@ python test_phase1.py  # All tests should pass ✓
 - ✓ `util_ssm/mamba_layernames.py`
 - ✓ `test_phase1.py`
 
-### Phase 2: Basic Causal Tracing (TODO - NEXT)
+### Phase 2: Basic Causal Tracing ✓ COMPLETE
 
-**Goal:** Implement causal tracing for Mamba hidden states (NOT internal SSM states yet)
+**Goal:** Implement causal tracing for Mamba hidden states and residual stream
 
-**Tasks:**
-1. Create `mamba_analysis/mamba_repr_tools.py` (basic version)
-   - `get_mamba_states_at_tokens()`: Extract hidden states at specific positions
-   - Start with just hidden states (mixer output), not internal SSM state h_t
-   - Reuse ROME's tokenization patterns
+**Completed Tasks:**
+1. ✓ Created `mamba_analysis/mamba_repr_tools.py`
+   - `find_token_range()`: Locate subject tokens in prompts
 
-2. Create `mamba_analysis/mamba_causal_trace.py`
-   - `trace_with_patch_mamba()`: Core causal tracing function
-   - Algorithm:
-     1. Run clean input, save hidden states at all (layer, position) pairs
-     2. Corrupt input embeddings with noise (reuse ROME's noise injection)
-     3. Run corrupted input while selectively restoring clean hidden states
-     4. Measure effect on output probability
-   - Key difference from ROME: SSM states are recurrent, but we start by just restoring the hidden states (mixer outputs) like ROME does for transformers
+2. ✓ Created `mamba_analysis/mamba_causal_trace.py`
+   - `collect_states()`: Extract hidden states AND residuals from full blocks
+   - `trace_with_patch_mamba()`: Core causal tracing with embedding corruption + state restoration
+   - Supports both per-layer and per-position patching modes
+   - Properly handles Mamba's residual stream (both hidden_states and residuals from blocks)
 
-3. Create `experiments_ssm/run_causal_trace.py`
-   - Command-line script similar to ROME's `experiments/causal_trace.py`
-   - Run causal tracing on simple factual prompts
-   - Generate heatmaps showing (layer, position) importance
+3. ✓ Created `calculate_hidden_flow()`: Main entry point
+   - Per-layer mode (default): Test which layers are important
+   - Per-position mode: Test which (layer, position) pairs matter
+   - Returns scores ready for visualization
 
-4. Test on simple factual prompts
-   - Example: "The Eiffel Tower is located in" → "Paris"
-   - Compare patterns with GPT-2 results from ROME
+4. ✓ Created `notebooks/causal_tracing_visualization.ipynb`
+   - Interactive visualization of causal tracing results
+   - Supports both 1D (per-layer) and 2D (per-position) heatmaps
+   - Tested on factual prompts
 
-**Verification:** Heatmaps showing which (layer, position) pairs are critical for Mamba's predictions
+**Key Finding:** Per-layer mode shows early layers (especially layer 0) are critical because Mamba's residual stream flows forward through layers. This is different from transformers where late layers can be restored independently.
+
+**Verification:** ✓ Per-layer heatmaps working correctly in notebook
 
 **Critical Files:**
-- `mamba_analysis/mamba_causal_trace.py`
-- `mamba_analysis/mamba_repr_tools.py`
-- `experiments_ssm/run_causal_trace.py`
+- ✓ `mamba_causal_analysis/mamba_causal_trace.py`
+- ✓ `mamba_causal_analysis/mamba_repr_tools.py`
+- ✓ `notebooks/causal_tracing_visualization.ipynb`
 
-### Phase 3: SSM-Specific State Tracing (TODO)
+### Phase 3: Per-Position SSM State Tracing (IN PROGRESS)
 
-**Goal:** Trace internal SSM states (h_t) and selection parameters (B, C, Δt)
+**Goal:** Trace internal SSM states (h_t, conv_state) at per-position granularity
 
-**Tasks:**
-1. Enhance `mamba_analysis/mamba_repr_tools.py`
-   - Extract internal SSM recurrent state h_t (requires hooking deeper into the SSM computation)
-   - Extract selection parameters: B, C, Δt at each position
-   - This may require monkey-patching `selective_scan_fn` to expose internals
+**Current Status:** Planning complete, implementing Option 3 (token-by-token prototype)
 
-2. Extend `mamba_causal_trace.py`
-   - Add `patch_type` parameter: 'hidden_state' | 'ssm_state' | 'selection_params'
-   - Implement restoration of SSM internal state h_t
-   - Implement restoration of selection parameters B, C, Δt
-   - **Challenge:** Restoring h_t at position t affects all positions > t (recurrent dependency)
+**Approach Analysis:**
+- **Option 1 (Hook within selective_scan)**: ❌ Not feasible - it's a compiled CUDA kernel
+- **Option 2 (Hybrid batching)**: ✅ Best performance (10-50x faster) but complex (3-5 hours to implement)
+- **Option 3 (Token-by-token)**: ✅ Simplest (1-2 hours to implement) but slow (30-60 min runtime)
 
-3. Comparative experiments
-   - Compare restoring hidden states vs SSM states vs selection params
-   - Research question: Which intervention is most effective at recovering information?
-   - This reveals whether memory is in the state h_t or in the selection mechanism
+**Selected Approach:** Start with Option 3 for fastest time-to-first-heatmap (~2-3 hours total), then optimize with Option 2 if needed.
 
-4. Handle causal convolution
-   - Mamba uses causal conv1d with kernel size ~4
-   - Consider restoring conv buffer state as well
+**Implementation Plan (Option 3 - Token-by-Token Prototype):**
+
+1. Create `collect_ssm_states_sequential()` in `mamba_causal_trace.py`
+   - Use `InferenceParams` to process tokens one-by-one
+   - Save conv_state and ssm_state after each token at each layer
+   - Returns: {layer_idx: {position: (conv_state, ssm_state)}}
+
+2. Create `trace_with_ssm_state_patch_sequential()`
+   - Corrupt embeddings
+   - Process token-by-token through all layers
+   - At target (layer, position), inject clean SSM states
+   - Measure effect on final output
+
+3. Extend `calculate_hidden_flow()` with new mode
+   - Add `mode="per_position_sequential"` parameter
+   - Returns 2D scores array [num_layers, seq_len]
+
+4. Update notebook with per-position visualization
+   - Add 2D heatmap plotting
+   - Compare with per-layer results
+
+**Technical Details:**
+- Uses Mamba's `InferenceParams` with `key_value_memory_dict`
+- `seqlen_offset` tracks current position
+- States: `conv_state` [batch, d_inner, d_conv], `ssm_state` [batch, d_inner, d_state]
+- Inject states by modifying `key_value_memory_dict[layer_idx]`
+
+**Performance:**
+- Estimated runtime: 30-60 minutes for 24 layers × 8 positions × 10 samples
+- Acceptable for short sequences (<10 tokens)
+- Will optimize with Option 2 (hybrid batching) if needed
+
+**Next Steps After Prototype:**
+1. Validate results are meaningful (early layers × early positions should matter)
+2. Compare with per-layer results for consistency
+3. Decide if Option 2 optimization is needed
 
 **Verification:** Can selectively restore different components of SSM computation and measure differential effects
 
@@ -292,12 +315,18 @@ This project builds upon the ROME methodology and includes `nethook.py` from the
   - [x] `mamba_layernames.py`
   - [x] `test_phase1.py`
   - [x] Documentation
-- [ ] Phase 2: Basic Causal Tracing - NEXT
-  - [ ] `mamba_repr_tools.py`
-  - [ ] `mamba_causal_trace.py`
-  - [ ] `run_causal_trace.py`
-  - [ ] Initial experiments and heatmaps
-- [ ] Phase 3: SSM-Specific State Tracing
+- [x] Phase 2: Basic Causal Tracing - COMPLETE
+  - [x] `mamba_repr_tools.py`
+  - [x] `mamba_causal_trace.py` (per-layer + per-position modes)
+  - [x] `notebooks/causal_tracing_visualization.ipynb`
+  - [x] Initial experiments and per-layer heatmaps
+  - [x] Fixed residual stream patching (patch both hidden_states and residuals)
+- [ ] Phase 3: Per-Position SSM State Tracing - IN PROGRESS
+  - [ ] `collect_ssm_states_sequential()` - Token-by-token state collection
+  - [ ] `trace_with_ssm_state_patch_sequential()` - SSM state injection
+  - [ ] Update `calculate_hidden_flow()` with per-position mode
+  - [ ] 2D heatmap visualization (layers × positions)
+  - [ ] Validation and comparison with per-layer results
 - [ ] Phase 4: Analysis and Visualization
 - [ ] Phase 5: Scale Up and Iterate
 
