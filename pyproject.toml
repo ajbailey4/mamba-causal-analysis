@@ -10,9 +10,10 @@ authors = [
 ]
 
 dependencies = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
-    "torchaudio>=2.0.0",
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
+    "torchaudio>=2.5.0",
+    "causal-conv1d>=1.6.0",
     "mamba-ssm>=1.2.0",
     "transformers>=4.30.0",
     "tokenizers>=0.13.0",
@@ -51,6 +52,8 @@ dev = [
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
+# Use prebuilt wheel for causal-conv1d that matches PyTorch 2.5 + CUDA 12
+causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.0/causal_conv1d-1.6.0+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch"
