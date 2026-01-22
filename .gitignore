@@ -70,6 +70,7 @@ logs/
 tmp/
 temp/
 *.tmp
+.nfs*
 
 # Environment variables
 .env
