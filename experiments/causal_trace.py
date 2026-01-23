@@ -8,8 +8,10 @@ import numpy
 import torch
 from datasets import load_dataset
 from matplotlib import pyplot as plt
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+from mamba_ssm.utils.generation import InferenceParams
 
 from dsets import KnownsDataset
 from rome.tok_dataset import (
@@ -162,7 +164,18 @@ def trace_with_patch(
     To trace the effect of just a single state, this can be just a single
     token/layer pair.  To trace the effect of restoring a set of states,
     any number of token indices and layers can be listed.
+
+    For Mamba models, automatically dispatches to trace_with_patch_mamba
+    which uses token-by-token SSM state patching.
     """
+
+    # Dispatch to Mamba-specific implementation for SSM state patching
+    if is_mamba_model(model):
+        return trace_with_patch_mamba(
+            model, inp, states_to_patch, answers_t, tokens_to_mix,
+            noise=noise, uniform_noise=uniform_noise, replace=replace,
+            trace_layers=trace_layers,
+        )
 
     rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
     if uniform_noise:
@@ -225,6 +238,130 @@ def trace_with_patch(
             [untuple(td[layer].output).detach().cpu() for layer in trace_layers], dim=2
         )
         return probs, all_traced
+
+    return probs
+
+
+def trace_with_patch_mamba(
+    model,  # The model
+    inp,  # A set of inputs
+    states_to_patch,  # A list of (token index, layername) triples to restore
+    answers_t,  # Answer probabilities to collect
+    tokens_to_mix,  # Range of tokens to corrupt (begin, end)
+    noise=0.1,  # Level of noise to add
+    uniform_noise=False,
+    replace=False,  # True to replace with instead of add noise
+    trace_layers=None,  # List of traced outputs to return
+):
+    """
+    Mamba-specific causal tracing using token-by-token SSM state patching.
+
+    Uses native mamba_ssm InferenceParams for proper cache handling:
+    1. Collects clean SSM states by processing the clean input token-by-token
+    2. Runs corrupted inputs token-by-token, injecting clean SSM states
+       at the specified (token, layer) positions
+    """
+    rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
+    if uniform_noise:
+        prng = lambda *shape: rs.uniform(-1, 1, shape)
+    else:
+        prng = lambda *shape: rs.randn(*shape)
+
+    if isinstance(noise, float):
+        noise_fn = lambda x: noise * x
+    else:
+        noise_fn = noise
+
+    # Convert (token, layername) to {layer_idx: [positions]}
+    patch_spec = defaultdict(list)
+    for t, layer_name in states_to_patch:
+        match = re.search(r'\.(\d+)(?:\.|$)', layer_name)
+        if match:
+            patch_spec[int(match.group(1))].append(t)
+
+    device = next(model.parameters()).device
+    input_ids = inp["input_ids"].to(device)
+    batch_size, seq_len = input_ids.shape
+    num_layers = len(list(model.backbone.layers))
+
+    # Compute all embeddings and add noise to batch items 1+ in tokens_to_mix range
+    with torch.no_grad():
+        all_embeds = model.backbone.embedding(input_ids)
+
+    if tokens_to_mix is not None:
+        b, e = tokens_to_mix
+        noise_data = noise_fn(
+            torch.from_numpy(prng(batch_size - 1, e - b, all_embeds.shape[2]))
+        ).to(all_embeds.device, dtype=all_embeds.dtype)
+        if replace:
+            all_embeds[1:, b:e] = noise_data
+        else:
+            all_embeds[1:, b:e] += noise_data
+
+    # Collect clean SSM states from batch item 0 (token-by-token)
+    clean_states = {layer: {} for layer in range(num_layers)}  # {layer: {pos: (conv, ssm)}}
+
+    inference_params = InferenceParams(max_seqlen=seq_len, max_batch_size=1)
+    cache = model.allocate_inference_cache(1, max_seqlen=seq_len)
+    inference_params.key_value_memory_dict = cache
+
+    with torch.no_grad():
+        for pos in range(seq_len):
+            token_embed = all_embeds[0:1, pos:pos+1, :]
+
+            # Process through backbone layers manually
+            hidden_states = token_embed
+            residual = None
+            for layer_idx, layer in enumerate(model.backbone.layers):
+                hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
+
+            # Save states after this position
+            for layer_idx in range(num_layers):
+                if layer_idx in cache:
+                    conv_state, ssm_state = cache[layer_idx]
+                    clean_states[layer_idx][pos] = (conv_state.clone(), ssm_state.clone())
+
+            inference_params.seqlen_offset += 1
+
+    # Run corrupted inputs (batch items 1+) with SSM state patching
+    all_logits = []
+    for batch_idx in range(1, batch_size):
+        # Fresh cache for each corrupted run
+        inference_params = InferenceParams(max_seqlen=seq_len, max_batch_size=1)
+        cache = model.allocate_inference_cache(1, max_seqlen=seq_len)
+        inference_params.key_value_memory_dict = cache
+
+        with torch.no_grad():
+            for pos in range(seq_len):
+                # Inject clean SSM states at patched positions BEFORE processing
+                for layer_idx, positions in patch_spec.items():
+                    if pos in positions and layer_idx in cache and pos in clean_states[layer_idx]:
+                        clean_conv, clean_ssm = clean_states[layer_idx][pos]
+                        cache[layer_idx] = (clean_conv.clone(), clean_ssm.clone())
+
+                token_embed = all_embeds[batch_idx:batch_idx+1, pos:pos+1, :]
+
+                # Process through backbone layers manually
+                hidden_states = token_embed
+                residual = None
+                for layer_idx, layer in enumerate(model.backbone.layers):
+                    hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
+
+                inference_params.seqlen_offset += 1
+
+            # Get final logits after processing all tokens
+            if residual is not None:
+                hidden_states = hidden_states + residual
+            hidden_states = model.backbone.norm_f(hidden_states)
+            logits = model.lm_head(hidden_states)
+            all_logits.append(logits)
+
+    # We report softmax probabilities for the answers_t token predictions of interest.
+    all_logits = torch.cat(all_logits, dim=0)
+    probs = torch.softmax(all_logits[:, -1, :], dim=1).mean(dim=0)[answers_t]
+
+    if trace_layers is not None:
+        return probs, None  # trace_layers not supported for SSM state patching
 
     return probs
 
@@ -311,7 +448,7 @@ def calculate_hidden_flow(
     Runs causal tracing over every token/layer combination in the network
     and returns a dictionary numerically summarizing the results.
     """
-    inp = make_inputs(mt.tokenizer, [prompt] * (samples + 1))
+    inp = make_inputs(mt.tokenizer, [prompt] * (samples + 1), include_attention_mask=not is_mamba_model(mt.model))
     with torch.no_grad():
         answer_t, base_score = [d[0] for d in predict_from_input(mt.model, inp)]
     [answer] = decode_tokens(mt.tokenizer, [answer_t])
@@ -382,6 +519,10 @@ def trace_important_states(
 
     if token_range is None:
         token_range = range(ntoks)
+
+    total_iterations = len(token_range) * num_layers
+    pbar = tqdm(total=total_iterations, desc="Tracing states")
+
     for tnum in token_range:
         row = []
         for layer in range(num_layers):
@@ -396,7 +537,9 @@ def trace_important_states(
                 replace=replace,
             )
             row.append(r)
+            pbar.update(1)
         table.append(torch.stack(row))
+    pbar.close()
     return torch.stack(table)
 
 
@@ -418,6 +561,10 @@ def trace_important_window(
 
     if token_range is None:
         token_range = range(ntoks)
+
+    total_iterations = len(token_range) * num_layers
+    pbar = tqdm(total=total_iterations, desc=f"Tracing {kind} window")
+
     for tnum in token_range:
         row = []
         for layer in range(num_layers):
@@ -438,7 +585,9 @@ def trace_important_window(
                 replace=replace,
             )
             row.append(r)
+            pbar.update(1)
         table.append(torch.stack(row))
+    pbar.close()
     return torch.stack(table)
 
 
@@ -459,12 +608,20 @@ class ModelAndTokenizer:
     ):
         if tokenizer is None:
             assert model_name is not None
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            if "mamba" in model_name.lower():
+                # Use GPT-NeoX tokenizer for Mamba models
+                tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
         if model is None:
             assert model_name is not None
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
-            )
+            if "mamba" in model_name.lower():
+                # Load native mamba_ssm model
+                model = MambaLMHeadModel.from_pretrained(model_name)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                )
             nethook.set_requires_grad(False, model)
             model.eval().cuda()
         self.tokenizer = tokenizer
@@ -472,7 +629,7 @@ class ModelAndTokenizer:
         self.layer_names = [
             n
             for n, m in model.named_modules()
-            if (re.match(r"^(transformer|gpt_neox)\.(h|layers)\.\d+$", n))
+            if (re.match(r"^(transformer|gpt_neox|backbone)\.(h|layers)\.\d+$", n))
         ]
         self.num_layers = len(self.layer_names)
 
@@ -495,7 +652,16 @@ def layername(model, num, kind=None):
         if kind == "attn":
             kind = "attention"
         return f'gpt_neox.layers.{num}{"" if kind is None else "." + kind}'
+    if hasattr(model, "backbone"):
+        if kind == "embed":
+            return "backbone.embedding"
+        return f'backbone.layers.{num}{"" if kind is None else "." + kind}'
     assert False, "unknown transformer structure"
+
+
+def is_mamba_model(model):
+    """Check if model is a Mamba SSM model."""
+    return hasattr(model, "backbone") and hasattr(model.backbone, "layers")
 
 
 def guess_subject(prompt):
@@ -589,7 +755,7 @@ def plot_all_flow(mt, prompt, subject=None):
 
 
 # Utilities for dealing with tokens
-def make_inputs(tokenizer, prompts, device="cuda"):
+def make_inputs(tokenizer, prompts, device="cuda", include_attention_mask=True):
     token_lists = [tokenizer.encode(p) for p in prompts]
     maxlen = max(len(t) for t in token_lists)
     if "[PAD]" in tokenizer.all_special_tokens:
@@ -598,12 +764,14 @@ def make_inputs(tokenizer, prompts, device="cuda"):
         pad_id = 0
     input_ids = [[pad_id] * (maxlen - len(t)) + t for t in token_lists]
     # position_ids = [[0] * (maxlen - len(t)) + list(range(len(t))) for t in token_lists]
-    attention_mask = [[0] * (maxlen - len(t)) + [1] * len(t) for t in token_lists]
-    return dict(
+    result = dict(
         input_ids=torch.tensor(input_ids).to(device),
         #    position_ids=torch.tensor(position_ids).to(device),
-        attention_mask=torch.tensor(attention_mask).to(device),
     )
+    if include_attention_mask:
+        attention_mask = [[0] * (maxlen - len(t)) + [1] * len(t) for t in token_lists]
+        result["attention_mask"] = torch.tensor(attention_mask).to(device)
+    return result
 
 
 def decode_tokens(tokenizer, token_array):
@@ -629,7 +797,7 @@ def find_token_range(tokenizer, token_array, substring):
 
 
 def predict_token(mt, prompts, return_p=False):
-    inp = make_inputs(mt.tokenizer, prompts)
+    inp = make_inputs(mt.tokenizer, prompts, include_attention_mask=not is_mamba_model(mt.model))
     preds, p = predict_from_input(mt.model, inp)
     result = [mt.tokenizer.decode(c) for c in preds]
     if return_p:
@@ -638,8 +806,15 @@ def predict_token(mt, prompts, return_p=False):
 
 
 def predict_from_input(model, inp):
-    out = model(**inp)["logits"]
-    probs = torch.softmax(out[:, -1], dim=1)
+    out = model(**inp)
+    # Handle both native mamba_ssm and HuggingFace output formats
+    if hasattr(out, 'logits'):
+        logits = out.logits
+    elif isinstance(out, dict):
+        logits = out["logits"]
+    else:
+        logits = out  # Native mamba may return tensor directly
+    probs = torch.softmax(logits[:, -1], dim=1)
     p, preds = torch.max(probs, dim=1)
     return preds, p
 
@@ -647,7 +822,7 @@ def predict_from_input(model, inp):
 def collect_embedding_std(mt, subjects):
     alldata = []
     for s in subjects:
-        inp = make_inputs(mt.tokenizer, [s])
+        inp = make_inputs(mt.tokenizer, [s], include_attention_mask=not is_mamba_model(mt.model))
         with nethook.Trace(mt.model, layername(mt.model, 0, "embed")) as t:
             mt.model(**inp)
             alldata.append(t.output[0])
