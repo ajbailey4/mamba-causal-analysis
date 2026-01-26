@@ -56,6 +56,8 @@ def main():
     aa("--output_dir", default="results/{model_name}/causal_trace")
     aa("--noise_level", default="s3", type=parse_noise_rule)
     aa("--replace", default=0, type=int)
+    aa("--num_workers", default=1, type=int, help="Total number of parallel workers")
+    aa("--worker_id", default=0, type=int, help="This worker's ID (0-indexed)")
     args = parser.parse_args()
 
     modeldir = f'r{args.replace}_{args.model_name.replace("/", "_")}'
@@ -99,7 +101,14 @@ def main():
             uniform_noise = True
             noise_level = float(noise_level[1:])
 
-    for knowledge in tqdm(knowns):
+    # Filter knowns for this worker (for parallel execution on HTC)
+    total_knowns = len(knowns)
+    knowns_slice = knowns[args.worker_id :: args.num_workers]
+    if args.num_workers > 1:
+        print(f"Worker {args.worker_id}/{args.num_workers}: processing {len(knowns)}/{total_knowns} items")
+
+
+    for knowledge in tqdm(knowns_slice):
         known_id = knowledge["known_id"]
         for kind in None, "ssm_state", "conv_state":
             kind_suffix = f"_{kind}" if kind else ""
