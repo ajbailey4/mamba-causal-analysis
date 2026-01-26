@@ -43,6 +43,7 @@ def main():
         "--model_name",
         default="gpt2-xl",
         choices=[
+            "state-spaces/mamba-1.4b",
             "gpt2-xl",
             "EleutherAI/gpt-j-6B",
             "EleutherAI/gpt-neox-20b",
@@ -100,7 +101,7 @@ def main():
 
     for knowledge in tqdm(knowns):
         known_id = knowledge["known_id"]
-        for kind in None, "mlp", "attn":
+        for kind in None, "ssm_state", "conv_state":
             kind_suffix = f"_{kind}" if kind else ""
             filename = f"{result_dir}/knowledge_{known_id}{kind_suffix}.npz"
             if not os.path.isfile(filename):
@@ -142,6 +143,7 @@ def trace_with_patch(
     uniform_noise=False,
     replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
+    kind=None,
 ):
     """
     Runs a single causal trace.  Given a model and a batch input where
@@ -172,9 +174,16 @@ def trace_with_patch(
     # Dispatch to Mamba-specific implementation for SSM state patching
     if is_mamba_model(model):
         return trace_with_patch_mamba(
-            model, inp, states_to_patch, answers_t, tokens_to_mix,
-            noise=noise, uniform_noise=uniform_noise, replace=replace,
+            model,
+            inp,
+            states_to_patch,
+            answers_t,
+            tokens_to_mix,
+            noise=noise,
+            uniform_noise=uniform_noise,
+            replace=replace,
             trace_layers=trace_layers,
+            kind=kind,
         )
 
     rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
@@ -222,11 +231,14 @@ def trace_with_patch(
 
     # With the patching rules defined, run the patched model in inference.
     additional_layers = [] if trace_layers is None else trace_layers
-    with torch.no_grad(), nethook.TraceDict(
-        model,
-        [embed_layername] + list(patch_spec.keys()) + additional_layers,
-        edit_output=patch_rep,
-    ) as td:
+    with (
+        torch.no_grad(),
+        nethook.TraceDict(
+            model,
+            [embed_layername] + list(patch_spec.keys()) + additional_layers,
+            edit_output=patch_rep,
+        ) as td,
+    ):
         outputs_exp = model(**inp)
 
     # We report softmax probabilities for the answers_t token predictions of interest.
@@ -252,14 +264,21 @@ def trace_with_patch_mamba(
     uniform_noise=False,
     replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
+    kind=None,  # None (both) or "ssm_state"
 ):
     """
     Mamba-specific causal tracing using token-by-token SSM state patching.
 
     Uses native mamba_ssm InferenceParams for proper cache handling:
     1. Collects clean SSM states by processing the clean input token-by-token
-    2. Runs corrupted inputs token-by-token, injecting clean SSM states
+    2. Runs corrupted inputs token-by-token, injecting clean states
        at the specified (token, layer) positions
+
+    Args:
+        kind: Which internal states to patch:
+            - None: Patch both conv_state and ssm_state (default)
+            - "ssm_state": Only patch ssm_state, keep corrupted conv_state
+            - "conv_state": Only patch conv_state, keep corrupted ssm_state
     """
     rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
     if uniform_noise:
@@ -275,7 +294,7 @@ def trace_with_patch_mamba(
     # Convert (token, layername) to {layer_idx: [positions]}
     patch_spec = defaultdict(list)
     for t, layer_name in states_to_patch:
-        match = re.search(r'\.(\d+)(?:\.|$)', layer_name)
+        match = re.search(r"\.(\d+)(?:\.|$)", layer_name)
         if match:
             patch_spec[int(match.group(1))].append(t)
 
@@ -299,7 +318,9 @@ def trace_with_patch_mamba(
             all_embeds[1:, b:e] += noise_data
 
     # Collect clean SSM states from batch item 0 (token-by-token)
-    clean_states = {layer: {} for layer in range(num_layers)}  # {layer: {pos: (conv, ssm)}}
+    clean_states = {
+        layer: {} for layer in range(num_layers)
+    }  # {layer: {pos: (conv, ssm)}}
 
     inference_params = InferenceParams(max_seqlen=seq_len, max_batch_size=1)
     cache = model.allocate_inference_cache(1, max_seqlen=seq_len)
@@ -307,19 +328,24 @@ def trace_with_patch_mamba(
 
     with torch.no_grad():
         for pos in range(seq_len):
-            token_embed = all_embeds[0:1, pos:pos+1, :]
+            token_embed = all_embeds[0:1, pos : pos + 1, :]
 
             # Process through backbone layers manually
             hidden_states = token_embed
             residual = None
             for layer_idx, layer in enumerate(model.backbone.layers):
-                hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
+                hidden_states, residual = layer(
+                    hidden_states, residual, inference_params=inference_params
+                )
 
             # Save states after this position
             for layer_idx in range(num_layers):
                 if layer_idx in cache:
                     conv_state, ssm_state = cache[layer_idx]
-                    clean_states[layer_idx][pos] = (conv_state.clone(), ssm_state.clone())
+                    clean_states[layer_idx][pos] = (
+                        conv_state.clone(),
+                        ssm_state.clone(),
+                    )
 
             inference_params.seqlen_offset += 1
 
@@ -335,17 +361,33 @@ def trace_with_patch_mamba(
             for pos in range(seq_len):
                 # Inject clean SSM states at patched positions BEFORE processing
                 for layer_idx, positions in patch_spec.items():
-                    if pos in positions and layer_idx in cache and pos in clean_states[layer_idx]:
+                    if (
+                        pos in positions
+                        and layer_idx in cache
+                        and pos in clean_states[layer_idx]
+                    ):
                         clean_conv, clean_ssm = clean_states[layer_idx][pos]
-                        cache[layer_idx] = (clean_conv.clone(), clean_ssm.clone())
+                        if kind is None:
+                            # Patch both conv_state and ssm_state
+                            cache[layer_idx] = (clean_conv.clone(), clean_ssm.clone())
+                        elif kind == "ssm_state":
+                            # Keep current conv_state, only patch ssm_state
+                            current_conv, _ = cache[layer_idx]
+                            cache[layer_idx] = (current_conv, clean_ssm.clone())
+                        elif kind == "conv_state":
+                            # Keep current ssm_state, only patch conv_state
+                            _, current_ssm = cache[layer_idx]
+                            cache[layer_idx] = (clean_conv.clone(), current_ssm)
 
-                token_embed = all_embeds[batch_idx:batch_idx+1, pos:pos+1, :]
+                token_embed = all_embeds[batch_idx : batch_idx + 1, pos : pos + 1, :]
 
                 # Process through backbone layers manually
                 hidden_states = token_embed
                 residual = None
                 for layer_idx, layer in enumerate(model.backbone.layers):
-                    hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
+                    hidden_states, residual = layer(
+                        hidden_states, residual, inference_params=inference_params
+                    )
 
                 inference_params.seqlen_offset += 1
 
@@ -416,11 +458,14 @@ def trace_with_repatch(
 
     # With the patching rules defined, run the patched model in inference.
     for first_pass in [True, False] if states_to_unpatch else [False]:
-        with torch.no_grad(), nethook.TraceDict(
-            model,
-            [embed_layername] + list(patch_spec.keys()) + list(unpatch_spec.keys()),
-            edit_output=patch_rep,
-        ) as td:
+        with (
+            torch.no_grad(),
+            nethook.TraceDict(
+                model,
+                [embed_layername] + list(patch_spec.keys()) + list(unpatch_spec.keys()),
+                edit_output=patch_rep,
+            ) as td,
+        ):
             outputs_exp = model(**inp)
             if first_pass:
                 first_pass_trace = td
@@ -448,7 +493,11 @@ def calculate_hidden_flow(
     Runs causal tracing over every token/layer combination in the network
     and returns a dictionary numerically summarizing the results.
     """
-    inp = make_inputs(mt.tokenizer, [prompt] * (samples + 1), include_attention_mask=not is_mamba_model(mt.model))
+    inp = make_inputs(
+        mt.tokenizer,
+        [prompt] * (samples + 1),
+        include_attention_mask=not is_mamba_model(mt.model),
+    )
     with torch.no_grad():
         answer_t, base_score = [d[0] for d in predict_from_input(mt.model, inp)]
     [answer] = decode_tokens(mt.tokenizer, [answer_t])
@@ -462,32 +511,33 @@ def calculate_hidden_flow(
     low_score = trace_with_patch(
         mt.model, inp, [], answer_t, e_range, noise=noise, uniform_noise=uniform_noise
     ).item()
-    if not kind:
-        differences = trace_important_states(
-            mt.model,
-            mt.num_layers,
-            inp,
-            e_range,
-            answer_t,
-            noise=noise,
-            uniform_noise=uniform_noise,
-            replace=replace,
-            token_range=token_range,
-        )
-    else:
-        differences = trace_important_window(
-            mt.model,
-            mt.num_layers,
-            inp,
-            e_range,
-            answer_t,
-            noise=noise,
-            uniform_noise=uniform_noise,
-            replace=replace,
-            window=window,
-            kind=kind,
-            token_range=token_range,
-        )
+    # if not kind:
+    differences = trace_important_states(
+        mt.model,
+        mt.num_layers,
+        inp,
+        e_range,
+        answer_t,
+        noise=noise,
+        uniform_noise=uniform_noise,
+        replace=replace,
+        token_range=token_range,
+        kind=kind,
+    )
+    # else:
+    #     differences = trace_important_window(
+    #         mt.model,
+    #         mt.num_layers,
+    #         inp,
+    #         e_range,
+    #         answer_t,
+    #         noise=noise,
+    #         uniform_noise=uniform_noise,
+    #         replace=replace,
+    #         window=window,
+    #         kind=kind,
+    #         token_range=token_range,
+    #     )
     differences = differences.detach().cpu()
     return dict(
         scores=differences,
@@ -513,6 +563,7 @@ def trace_important_states(
     uniform_noise=False,
     replace=False,
     token_range=None,
+    kind=None,
 ):
     ntoks = inp["input_ids"].shape[1]
     table = []
@@ -535,6 +586,7 @@ def trace_important_states(
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
+                kind=kind,
             )
             row.append(r)
             pbar.update(1)
@@ -620,7 +672,9 @@ class ModelAndTokenizer:
                 model = MambaLMHeadModel.from_pretrained(model_name)
             else:
                 model = AutoModelForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                    model_name,
+                    low_cpu_mem_usage=low_cpu_mem_usage,
+                    torch_dtype=torch_dtype,
                 )
             nethook.set_requires_grad(False, model)
             model.eval().cuda()
@@ -710,13 +764,21 @@ def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=
     for i in range(*result["subject_range"]):
         labels[i] = labels[i] + "*"
 
+    # Colormap for different kinds
+    cmap_dict = {
+        None: "Purples",
+        "None": "Purples",
+        "mlp": "Greens",
+        "attn": "Reds",
+        "ssm_state": "Blues",
+        "conv_state": "Oranges",
+    }
+
     with plt.rc_context(rc={"font.family": "Times New Roman"}):
         fig, ax = plt.subplots(figsize=(3.5, 2), dpi=200)
         h = ax.pcolor(
             differences,
-            cmap={None: "Purples", "None": "Purples", "mlp": "Greens", "attn": "Reds"}[
-                kind
-            ],
+            cmap=cmap_dict.get(kind, "Purples"),
             vmin=low_score,
         )
         ax.invert_yaxis()
@@ -725,12 +787,18 @@ def plot_trace_heatmap(result, savepdf=None, title=None, xlabel=None, modelname=
         ax.set_xticklabels(list(range(0, differences.shape[1] - 6, 5)))
         ax.set_yticklabels(labels)
         if not modelname:
-            modelname = "GPT"
+            modelname = "Mamba"
         if not kind:
             ax.set_title("Impact of restoring state after corrupted input")
             ax.set_xlabel(f"single restored layer within {modelname}")
         else:
-            kindname = "MLP" if kind == "mlp" else "Attn"
+            kindname_map = {
+                "mlp": "MLP",
+                "attn": "Attn",
+                "ssm_state": "SSM State",
+                "conv_state": "Conv State",
+            }
+            kindname = kindname_map.get(kind, kind)
             ax.set_title(f"Impact of restoring {kindname} after corrupted input")
             ax.set_xlabel(f"center of interval of {window} restored {kindname} layers")
         cb = plt.colorbar(h)
@@ -797,7 +865,9 @@ def find_token_range(tokenizer, token_array, substring):
 
 
 def predict_token(mt, prompts, return_p=False):
-    inp = make_inputs(mt.tokenizer, prompts, include_attention_mask=not is_mamba_model(mt.model))
+    inp = make_inputs(
+        mt.tokenizer, prompts, include_attention_mask=not is_mamba_model(mt.model)
+    )
     preds, p = predict_from_input(mt.model, inp)
     result = [mt.tokenizer.decode(c) for c in preds]
     if return_p:
@@ -808,7 +878,7 @@ def predict_token(mt, prompts, return_p=False):
 def predict_from_input(model, inp):
     out = model(**inp)
     # Handle both native mamba_ssm and HuggingFace output formats
-    if hasattr(out, 'logits'):
+    if hasattr(out, "logits"):
         logits = out.logits
     elif isinstance(out, dict):
         logits = out["logits"]
@@ -822,7 +892,9 @@ def predict_from_input(model, inp):
 def collect_embedding_std(mt, subjects):
     alldata = []
     for s in subjects:
-        inp = make_inputs(mt.tokenizer, [s], include_attention_mask=not is_mamba_model(mt.model))
+        inp = make_inputs(
+            mt.tokenizer, [s], include_attention_mask=not is_mamba_model(mt.model)
+        )
         with nethook.Trace(mt.model, layername(mt.model, 0, "embed")) as t:
             mt.model(**inp)
             alldata.append(t.output[0])
