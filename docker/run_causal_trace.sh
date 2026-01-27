@@ -7,7 +7,7 @@ date
 nvidia-smi || true
 echo "========================="
 
-cd /workspace/mamba_causal_analysis
+cd /workspace/mamba-causal-analysis
 
 python experiments/causal_trace.py \
   --num_workers ${NUM_WORKERS} \
