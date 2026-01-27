@@ -55,6 +55,9 @@ torchaudio = { index = "pytorch" }
 # Use prebuilt wheel for causal-conv1d that matches PyTorch 2.5 + CUDA 12
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.0/causal_conv1d-1.6.0+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }
 
+[tool.uv.extra-build-dependencies]
+mamba-ssm = ["setuptools"]
+
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu121"
