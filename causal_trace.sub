@@ -1,0 +1,38 @@
+# causal_trace.sub
+
+universe = docker 
+docker_image = docker://ajbailey4/mamba-causal-analysis:1.1
+executable = run_causal_trace.sh
+
+# Pass arguments as environment variables
+# These can be read inside run_causal_trace.sh
+num_workers = 10
+model_name = state-spaces/mamba-1.4b
+noise_level = s3
+arguments = $(Process) $(num_workers) $(model_name) $(noise_level)
+
+# Input files
+transfer_input_files = \
+    run_causal_trace.sh, \
+    results/
+
+# Output files
+transfer_output_files = results/
+
+# Logs
+log = results/logs/causal_trace_$(Cluster)_$(Process).log
+error = results/logs/causal_trace_$(Cluster)_$(Process).err
+output = results/logs/causal_trace_$(Cluster)_$(Process).out
+
+# Resource requests
+request_cpus = 1
+request_memory = 16GB
+request_disk = 10GB
+Requirements = (Target.CUDADriverVersion >= 10.1)
++WantGPULab = true
++GPUJobLength = "short"
+request_gpus = 1
+
+# Queue multiple jobs if desired
+# Each job gets a unique $(Process) ID which your wrapper script uses as WORKER_ID
+queue $(num_workers)

@@ -4,17 +4,14 @@ version = "0.1.0"
 description = "Causal mediation analysis for Mamba State Space Models"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = { text = "MIT" }
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Aydan Bailey", email = "ajbailey4@wisc.edu"}
 ]
-
 dependencies = [
-    "torch>=2.5.0",
-    "torchvision>=0.20.0",
-    "torchaudio>=2.5.0",
-    "causal-conv1d>=1.6.0",
-    "mamba-ssm>=1.2.0",
+    "torch>=2.5.1",
+    "mamba-ssm==2.3.0",
+    "causal-conv1d==1.6.0",
     "transformers>=4.30.0",
     "tokenizers>=0.13.0",
     "datasets>=2.14.0",
@@ -34,31 +31,12 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=70.1", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[dependency-groups]
-dev = [
-    "jupyter>=1.0.0",
-    "ipykernel>=6.23.0",
-    "ipywidgets>=8.0.0",
-]
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["notebooks*", "docker*"]
 
-[tool.uv]
-# UV-specific configuration
-
-[tool.uv.sources]
-# Use PyTorch index for CUDA packages
-torch = { index = "pytorch" }
-torchvision = { index = "pytorch" }
-torchaudio = { index = "pytorch" }
-# Use prebuilt wheel for causal-conv1d that matches PyTorch 2.5 + CUDA 12
-causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.0/causal_conv1d-1.6.0+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }
-
-[tool.uv.extra-build-dependencies]
-mamba-ssm = ["setuptools"]
-
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
+[tool.setuptools.package-data]
+util = ["globals.yml"]
